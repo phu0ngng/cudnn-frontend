@@ -21,6 +21,8 @@ Dglu measures FC2 dgrad + dSwiGLU + dprob, including its buffer reset, without
 dbias; its kernel has one (cooperative) schedule and ignores the override.
 Glu and dglu use --glu-layout (interleaved_32 by default, or gate_then_up).
 Dgrad measures the FC2 dgrad (N=F, K=H), reading the forward weights N-major.
+Wgrad measures the FC2 dW2 = dY^T h, the (K, N) = (H, F) weight gradient
+reducing over each expert's M rows.
 Schedule checks are exact.
 """
 
@@ -45,6 +47,7 @@ DIRECTIONS = dict(
     glu=("grouped_gemm_glu_wrapper_sm90", "GroupedGemmGluSm90", SCHEDULES),
     dglu=("grouped_gemm_dglu_wrapper_sm90", "GroupedGemmDgluSm90", ("cooperative",)),
     dgrad=("grouped_gemm_wrapper_sm90", "GroupedGemmSm90", SCHEDULES),
+    wgrad=("grouped_gemm_wgrad_wrapper_sm90", "GroupedGemmWgradSm90", SCHEDULES),
 )
 
 
@@ -107,6 +110,20 @@ def problem(args, direction, schedule):
             b_tensor=torch.randn(groups, k, n, device="cuda", dtype=torch.bfloat16) * 0.125,
             b_major="n",
             c_tensor=torch.empty(rows, n, device="cuda", dtype=torch.bfloat16),
+        )
+    if direction == "wgrad":
+        # A = dY^T (K, rows) M-major and B = h (rows, N), both zero on the padding rows.
+        b = torch.randn(rows, n, device="cuda", dtype=torch.bfloat16) * 0.125
+        for expert in range(groups):
+            b[expert * m + valid_m : (expert + 1) * m].zero_()
+        kwargs = dict(
+            a_tensor=a.t(),
+            b_tensor=b,
+            sfa_tensor=None,
+            sfb_tensor=None,
+            offsets_tensor=kwargs["padded_offsets"],
+            mma_tiler_mn=kwargs["mma_tiler_mn"],
+            cluster_shape_mn=kwargs["cluster_shape_mn"],
         )
     metadata = dict(groups=groups, M=m, valid_M=valid_m, N=n, K=k, total_rows=rows, mma_tiler_mn=(128, tile_n), cluster_shape_mn=kwargs["cluster_shape_mn"])
     return kwargs, metadata

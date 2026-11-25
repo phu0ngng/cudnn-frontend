@@ -55,7 +55,7 @@ def _launch(op, problem, sched, arch="sm100", generate_c=True):
         output = torch.empty_like(problem["output"])
         discrete = problem["discrete"]
         ptrs = torch.tensor([expert.data_ptr() for expert in output], dtype=torch.int64, device="cuda") if discrete else None
-        cudnn.grouped_gemm_wgrad_wrapper_sm100(
+        getattr(cudnn, f"grouped_gemm_wgrad_wrapper_{arch}")(
             a_tensor=problem["a"],
             b_tensor=problem["b"],
             sfa_tensor=None,
@@ -146,9 +146,11 @@ def _assert_overlap_matches_serial(op, discrete, sched, arch="sm100", generate_c
             assert_bitwise(snapshot(result), reference, f"iteration {iteration} call {index}")
 
 
-# N=4096, K=1024: the shape rule picks pingpong for fwd / dgrad / GLU with C; the forced cases cover each schedule. dGLU
-# has one schedule.
-SM90_CASES = [(op, schedule) for op in ("fwd", "dgrad", "glu") for schedule in (None, "cooperative", "pingpong")] + [("dglu", None)]
+# N=4096, K=1024: the shape rule picks pingpong for fwd / dgrad / GLU with C and cooperative for wgrad (output
+# N=1024); the forced cases cover each schedule. dGLU has one schedule. SM90 wgrad writes a dense output.
+SM90_CASES = [
+    (op, schedule) for op in ("fwd", "dgrad", "glu", "wgrad") for schedule in (None, "cooperative", "pingpong")
+] + [("dglu", None)]
 
 
 @pytest.mark.parametrize("op,schedule", SM90_CASES, ids=[f"{op}-{schedule or 'heuristic'}" for op, schedule in SM90_CASES])

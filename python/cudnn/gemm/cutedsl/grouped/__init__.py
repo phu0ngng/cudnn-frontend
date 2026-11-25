@@ -52,8 +52,10 @@ from .dglu.api import (
 
 from .wgrad.api import (
     GroupedGemmWgradSm100,
+    GroupedGemmWgradSm90,
     get_grouped_gemm_wgrad_workspace_size_sm100,
     grouped_gemm_wgrad_wrapper_sm100,
+    grouped_gemm_wgrad_wrapper_sm90,
 )
 
 from .unfused.api import (
@@ -91,8 +93,10 @@ __all__ = [
     "GroupedGemmDgluSm90",
     "grouped_gemm_dglu_wrapper_sm90",
     "GroupedGemmWgradSm100",
+    "GroupedGemmWgradSm90",
     "get_grouped_gemm_wgrad_workspace_size_sm100",
     "grouped_gemm_wgrad_wrapper_sm100",
+    "grouped_gemm_wgrad_wrapper_sm90",
     "GroupedGemmSm100",
     "grouped_gemm_wrapper_sm100",
     "GroupedGemmSm90",
