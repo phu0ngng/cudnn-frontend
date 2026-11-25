@@ -21,7 +21,9 @@ Terms, with ``Q_N = ceil(N / cluster tile N)`` N tiles per M tile:
 - ``claim_idx``: one atomic add on the counter, one (M tile, N tile) of work.
   From ``M tiles * Q_N`` on, a claim gets END.
 - Expert-consecutive M batch: up to ``EXPERT_BATCH_MAX_M_TILES`` ready M tiles of one expert in a row.
-  It takes the next ``m_tile_count * Q_N`` claims N tile by N tile, so each N tile of B is reused from L2.
+  It takes the next ``m_tile_count * Q_N`` claims short side first, as the stock dynamic scheduler orders an expert: N tile
+  by N tile (each N tile of B reused from L2), or, when the batch has more M tiles than N tiles, M tile by M tile (the
+  M tile's A rows shared, and its C / D rows read and written whole, by the clusters running its N tiles at once).
 - ``linear_tile_idx = m_tile * Q_N + n_tile``, broadcast to the cluster. END is ``total_m_tiles * Q_N``.
 
 Example, ``Q_N = 2``, expert e0 with M tiles m0 and m1, e1 with m2; ``signal[1]`` is still -1::
@@ -595,8 +597,13 @@ class MoEStreamingInputBlockSignalTileScheduler:
             # it, so the record at this claim index's M-tile order is written and visible.
             first_claim_idx, first_m_tile, m_tile_count = self._get_expert_consecutive_m_batch_record(claim_idx // n_tiles_per_m_tile)
             claim_idx_in_batch = claim_idx - first_claim_idx
+            # Short side first (the stock dynamic scheduler's order within an expert): N tiles fastest when the batch has
+            # more M tiles than N tiles, else M tiles fastest.  Any order is safe: a batch holds only ready M tiles.
             n_tile = claim_idx_in_batch // m_tile_count
             m_tile = first_m_tile + claim_idx_in_batch % m_tile_count
+            if n_tiles_per_m_tile < m_tile_count:
+                n_tile = claim_idx_in_batch % n_tiles_per_m_tile
+                m_tile = first_m_tile + claim_idx_in_batch // n_tiles_per_m_tile
             # A batch holds only ready M-tiles, so this returns at once.  It is here for its
             # acquire, which pairs the producer's release and makes the M-tile's rows visible.
             _spin_until_at_least(streaming_signal_ptr(dynamic_state.counter_ptr) + m_tile, 0)
@@ -691,9 +698,12 @@ class StreamingInputSignalMixin:
         use_pdl: bool = False,
         launch_pdl_dependents_at_all_streaming_signal_slots_ready: bool = False,
         launch_pdl_dependents_at_entry: bool = False,
+        cluster_barrier_at_exit: bool = False,
     ) -> None:
         """Check and keep the options.  ``unmet_requirement``: what this kernel configuration lacks for a producer (for
-        example "dense weights"), or None."""
+        example "dense weights"), or None.  ``cluster_barrier_at_exit``: the kernel has no 2-CTA MMA and every CTA passes
+        a cluster barrier before it exits (the SM90 kernels), so a peer's last arrive always lands; a producer then needs
+        cluster (2, 1)."""
         self.streaming_signal_capacity = streaming_signal_capacity
         self.use_streaming_signal_sched = streaming_signal_capacity is not None
         if self.use_streaming_signal_sched and not use_dynamic_sched:
@@ -704,7 +714,10 @@ class StreamingInputSignalMixin:
             raise ValueError("device_layout requires streaming_signal_capacity")
         if launch_pdl_dependents_at_all_streaming_signal_slots_ready and not self.use_streaming_signal_sched:
             raise ValueError("launch_pdl_dependents_at_all_streaming_signal_slots_ready requires streaming_signal_capacity")
-        if self.use_streaming_signal_sched:
+        if self.use_streaming_signal_sched and cluster_barrier_at_exit:
+            if tuple(cluster_shape_mn) != (2, 1):
+                raise ValueError(f"streaming_signal_capacity requires cluster_shape_mn=(2, 1) on this kernel, got {tuple(cluster_shape_mn)}")
+        elif self.use_streaming_signal_sched:
             check_dynamic_sched_cluster_shape(use_2cta_instrs, cluster_shape_mn)
         self.device_layout = device_layout
         self.use_pdl = use_pdl
